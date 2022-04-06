@@ -1,11 +1,13 @@
 #!/bin/bash
 
+# shellcheck disable=SC2155
 export SCRIPT_PATH=$(dirname "$0")
 export DELEGATORS="${SCRIPT_PATH}/data/delegators.txt"
 export GRANTERS="${SCRIPT_PATH}/data/granters.txt"
 
 ####
 
+# shellcheck disable=SC2064
 if [ -z ${TMP+x} ]; then
     export TMP=$(mktemp -d)
     trap "{ rm -rf $TMP; }" EXIT
@@ -25,31 +27,38 @@ sanity_checks() {
 }
 
 get_delegators() {
-    limit=500
+    limit=100
 
-    if [ -z "$1" ]; then
-        echo "Fetching initial data ... "
-    else
-        param="&key=$1"
-        echo "Fetching with key $1 ... "
+    param=
+    offset=${1:-0}
+    if [ "${offset}" != "0" ]; then
+        param="--offset ${offset}"
+    fi
+    if [ -n "$RPC" ]; then
+        param="${param} --node ${RPC}"
     fi
 
-    out="${TMP}/delegators.json"
-    if ! curl -s "https://api.yummy.capital/v2/validators/${VALIDATOR}/delegators?limit=${limit}${param}" > "${out}"; then
-        echo "Error fetching delegators!"
-        exit 1
-    fi
-
+    tmp="$TMP/${VALIDATOR}.${offset}"
     F="${TMP}/delegators.txt"
-    if ! jq -r ".delegators[].account" "${out}" >> "${F}"; then
-        echo "Error parsing ${TMP}/delegators.txt! Dumping:"
-        cat "${out}"
+    echo "Fetching with offset ${offset} ..."
+
+    # shellcheck disable=SC2086
+    if ! ${BIN} q staking delegations-to "$VALIDATOR" --limit "${limit}" --output json ${param} > "${tmp}"; then
+        echo "Error querying delegators!"
         exit 1
     fi
 
-    next=$(jq -r ".pagination.nextKey // empty" "${out}")
-    if [ -n "$next" ]; then
-        get_delegators "${next}"
+    if ! jq -r ".delegation_responses[].delegation.delegator_address" "${tmp}" >> "${F}"; then
+        echo "Error parsing ${tmp}! Dumping:"
+        cat "${tmp}"
+        exit 1
+    fi
+
+    next=$(jq -r ".pagination.next_key // empty" "${tmp}")
+    if [ -n "$next" ] && [ "${offset}" -le "500" ]; then
+        # recurse
+        offset=$((offset+limit))
+        get_delegators "${offset}"
     else
         echo "Load complete. Moving ${F} ..."
         mv -f "${F}" "${DELEGATORS}"
@@ -57,6 +66,8 @@ get_delegators() {
 }
 
 load_grants() {
+    # called by load_granters
+
     limit=1000
 
     param=
@@ -70,19 +81,24 @@ load_grants() {
 
     tmp="$TMP/$1.${offset}"
 
-    if ! chain-maind q authz grants "$1" "$BOT" --limit "${limit}" --output json ${param} > "${tmp}"; then
+    # shellcheck disable=SC2086
+    if ! ${BIN} q authz grants "$1" "$BOT" --limit "${limit}" --output json ${param} > "${tmp}"; then
         echo "Error querying authz!"
         exit 1
     fi
 
     next=$(jq -r ".pagination.next_key // empty" "${tmp}")
     if [ -n "$next" ]; then
+        # recurse
         offset=$((offset+limit))
         load_grants "$1" "${offset}"
     fi
 }
 
-get_granters() {
+# shellcheck disable=SC2086
+load_granters() {
+    # called by parallel
+
     load_grants $1
 
     tmp="$TMP/$1"
@@ -99,8 +115,20 @@ get_granters() {
     touch "${TMP}/$1.granted"
 }
 
+get_granters() {
+    parallel -a "${DELEGATORS}" \
+        --jobs "${PARALLEL:-50}" \
+        --joblog joblog \
+        --retries 1 \
+        --progress --bar --eta \
+        load_granters
+
+    find "${TMP}" -type f -name "*.granted" -exec basename {} \; | cut -d. -f1 >> "${TMP}/granters.txt"
+    mv "${TMP}/granters.txt" "${GRANTERS}"
+}
+
 load_delegations() {
-    # calculate delegatable pending rewards
+    # calculate delegatable pending rewards. Called by parallel
 
     tmp="$TMP/$1"
     if ! ${BIN} q staking delegation "$1" "${VALIDATOR}" -o json > "$tmp"; then
@@ -134,8 +162,19 @@ load_delegations() {
     fi
 }
 
-generate_transactions() {
-    # concatenate transactions in batches and calculate fees
+process_delegations() {
+    # check individual delegations and generate claim-and-restake txs
+
+    parallel -a "${GRANTERS}" \
+        --jobs "${PARALLEL:-50}" \
+        --joblog joblog \
+        --retries 1 \
+        --progress --bar --eta \
+        load_delegations
+}
+
+generate_transactions_batch() {
+    # concatenate transactions in batches and calculate fees. Called by parallel
 
     if ! jq -s "(map(.body.messages) | flatten) as \$msgs | .[0].body.messages |= \$msgs | .[0].body.memo = \"${MEMO}\" | (.[0].body.messages | length) as \$len | .[0].auth_info.fee.gas_limit = (\$len * 200000 | tostring) | .[0].auth_info.fee.amount = [{\"denom\":\"${DENOM}\", \"amount\":(\$len * 200000 * 0.025 | floor | tostring)}] | .[0]" "${@}" > "${TMP}/batch.${PARALLEL_SEQ}.json"; then
         echo "Failed to generate transaction!"
@@ -143,10 +182,33 @@ generate_transactions() {
     fi
 }
 
+generate_transactions() {
+    # find generated tx jsons in batch of 50s and merge into 1 large tx
+
+    find "${TMP}" -type f -name "*.exec" |\
+        parallel \
+            -N "${PARALLEL:-50}" \
+            generate_transactions_batch
+}
+
+sign_and_send() {
+    # send all batched transactions
+
+    batch=0
+    for tx in "${TMP}"/batch.*.json; do
+        count=$(grep -c MsgExec "${tx}")
+        echo "Batch $(( ++batch )) = $count txs"
+
+        # sign and submit transaction
+        ${BIN} tx sign "${tx}" --from "${BOT}" --chain-id "${CHAIN}" |\
+            ${BIN} tx broadcast - --broadcast-mode sync
+    done
+}
+
 export -f load_grants
-export -f get_granters
+export -f load_granters
 export -f load_delegations
-export -f generate_transactions
+export -f generate_transactions_batch
 
 main() {
     echo "Starting ..."
@@ -160,49 +222,25 @@ main() {
         echo "No delegators found. Exiting."
         exit 0
     fi
-
     echo "Done. ${num_delegators} delegators found. Fetching grants ..."
-    parallel -a "${DELEGATORS}" \
-        --jobs "${PARALLEL:-50}" \
-        --joblog joblog \
-        --retries 1 \
-        --progress --bar --eta \
-        get_granters
 
-    find "${TMP}" -type f -name "*.granted" -exec basename {} \; | cut -d. -f1 >> "${TMP}/granters.txt"
-    mv "${TMP}/granters.txt" "${GRANTERS}"
+    get_granters
+
     num_granters=$(wc -l < "${GRANTERS}")
     if [ "$num_granters" -le 0 ]; then
         echo "No granters found. Exiting."
         exit 0
     fi
-
     echo "Done. ${num_delegators} delegators processed, found ${num_granters} granters."
-    echo "Loading delegations ..."
 
-    parallel -a "${GRANTERS}" \
-        --jobs "${PARALLEL:-50}" \
-        --joblog joblog \
-        --retries 1 \
-        --progress --bar --eta \
-        load_delegations
+    echo "Processing delegations ..."
+    process_delegations
 
     echo "Generating authz transactions ..."
-    find "${TMP}" -type f -name "*.exec" |\
-        parallel \
-            -N "${PARALLEL:-50}" \
-            generate_transactions
+    generate_transactions
 
     echo "Submitting final transactions ..."
-    batch=0
-    for tx in "${TMP}"/batch.*.json; do
-        count=$(grep -c MsgExec "${tx}")
-        echo "Batch $(( ++batch )) = $count txs"
-
-        # sign and submit transaction
-        ${BIN} tx sign "${tx}" --from "${BOT}" --chain-id "${CHAIN}" |\
-            ${BIN} tx broadcast - --broadcast-mode sync
-    done
+    sign_and_send
 
     echo "All done."
 }
