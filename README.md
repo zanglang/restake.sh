@@ -28,9 +28,11 @@ You will need:
     # run script
     ./main.sh
 
-## Implementing New Chains
+## Implementing New Chains & Features
 
 Core functionality can be overriden or extended by re-implementing functions in `base.sh`. For example, `cryptoorgchain.sh` demonstrates switching to [Yummy.capital](https://yummy.capital/)'s fantastic APIs for the Crypto.org Chain for fetching delegators, as well as custom logic to trigger compounding more frequently for larger delegators for higher APY %.
+
+To support running multiple chains within the same folder, simply copy `main.sh` to a new file and define the new environment variables. For example, a hypothetical `juno.sh` could load a new `juno_env.sh`.
 
 ## Cronjob
 
