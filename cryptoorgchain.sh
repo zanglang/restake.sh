@@ -39,5 +39,9 @@ get_delegators() {
     fi
 }
 
+# process_delegations() {
+#    # TODO: more frequent restaking for high delegations
+#}
+
 main
 
