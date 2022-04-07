@@ -55,7 +55,7 @@ get_delegators() {
     fi
 
     next=$(jq -r ".pagination.next_key // empty" "${tmp}")
-    if [ -n "$next" ] && [ "${offset}" -le "500" ]; then
+    if [ -n "$next" ] ; then
         # recurse
         offset=$((offset+limit))
         get_delegators "${offset}"
