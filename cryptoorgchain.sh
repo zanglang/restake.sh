@@ -1,4 +1,7 @@
 #!/bin/bash
+#
+# This is a sample script that uses the Yummy.capital explorer's APIs to fetch delegators,
+# which is significantly faster than the generic RPC endpoints.
 
 SCRIPT_PATH=$(dirname "$0")
 
@@ -38,10 +41,6 @@ get_delegators() {
         mv -f "${F}" "${DELEGATORS}"
     fi
 }
-
-# process_delegations() {
-#    # TODO: more frequent restaking for high delegations
-#}
 
 main
 
