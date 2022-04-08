@@ -118,7 +118,7 @@ load_granters() {
 get_granters() {
     parallel -a "${DELEGATORS}" \
         --jobs "${PARALLEL:-50}" \
-        --joblog joblog \
+        --joblog "${JOBLOG:-'joblog.log'}" \
         --retries 1 \
         --progress --bar --eta \
         load_granters
