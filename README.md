@@ -36,6 +36,30 @@ The wallet CLI should be configured with `<CLI> config` with the following confi
     # run script
     ./main.sh
 
+## Using the docker image
+First prepare your `env.sh` it will be included in the docker image if it is present durring build time. Alternatively you can mount it at runtime.
+
+It is important to set `JOBLOG` in `env.sh` to a writable path. Default should be at: `/restake/data/joblog.log`
+
+The image does expect the following mounts:
+
+- `/restake/data` writable working directory
+- `/chain-main/.chain-maind/keyring-test` keyring directory
+- `/restake/env.sh` (optional if included in build)
+
+Example using UUID & GUID 1000 (RPC is listening on host machine localhost, hence --network host):
+```
+git clone ...
+cd restake.sh
+
+# edit configuration
+cp env.sh.sample env.sh
+vim env.sh
+
+docker build --build-arg VERSION=3.3.4 --build-arg=UUID=1000 --build-arg GUID=1000 -t restake .
+docker run -it -v ~/.chain-maind/keyring-test:/chain-main/.chain-maind/keyring-test -v ~/restake.sh/data:/restake/data --network host restake
+```
+
 ## Implementing New Chains & Features
 
 Core functionality can be overriden or extended by re-implementing functions in `base.sh`. For example, `cryptoorgchain.sh` demonstrates switching to [Yummy.capital](https://yummy.capital/)'s fantastic APIs for the Crypto.org Chain for fetching delegators, as well as custom logic to trigger compounding more frequently for larger delegators for higher APY %.
