@@ -167,7 +167,7 @@ process_delegations() {
 
     parallel -a "${GRANTERS}" \
         --jobs "${PARALLEL:-50}" \
-        --joblog joblog \
+        --joblog "${JOBLOG:-'joblog.log'}" \
         --retries 1 \
         --progress --bar --eta \
         load_delegations
