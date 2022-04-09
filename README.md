@@ -56,7 +56,7 @@ cd restake.sh
 cp env.sh.sample env.sh
 vim env.sh
 
-docker build --build-arg VERSION=3.3.4 --build-arg=UUID=1000 --build-arg GUID=1000 -t restake .
+docker build --build-arg VERSION=v3.3.4 --build-arg=UUID=1000 --build-arg GUID=1000 -t restake .
 docker run -it -v ~/.chain-maind/keyring-test:/chain-main/.chain-maind/keyring-test -v ~/restake.sh/data:/restake/data --network host restake
 ```
 
