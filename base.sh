@@ -107,7 +107,7 @@ load_granters() {
     fi
 
     withdraw=$(jq -r "select(.authorization.msg==\"/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward\" and .expiration > now)" "${tmp}")
-    delegate=$(jq -r "select(.authorization.\"@type\"==\"/cosmos.staking.v1beta1.StakeAuthorization\" and (.authorization.allow_list.address[] | contains(\"$VALIDATOR\")) and .expiration > now)" "${tmp}")
+    delegate=$(jq -r "select(((.authorization.\"@type\"==\"/cosmos.staking.v1beta1.StakeAuthorization\" and (.authorization.allow_list.address[] | contains(\"$VALIDATOR\"))) or (.authorization.\"@type\"==\"/cosmos.authz.v1beta1.GenericAuthorization\" and .authorization.msg==\"/cosmos.staking.v1beta1.MsgDelegate\")) and .expiration > now)" "${tmp}")
     if [ -z "${withdraw}" ] || [ -z "${delegate}" ]; then
         return
     fi
@@ -183,11 +183,11 @@ generate_transactions_batch() {
 }
 
 generate_transactions() {
-    # find generated tx jsons in batch of 50s and merge into 1 large tx
+    # find generated tx jsons in batches and merge into 1 large tx
 
     find "${TMP}" -type f -name "*.exec" |\
         parallel \
-            -N "${PARALLEL:-50}" \
+            -N "${BATCH:-50}" \
             generate_transactions_batch
 }
 
@@ -201,7 +201,7 @@ sign_and_send() {
 
         # sign and submit transaction
         ${BIN} tx sign "${tx}" --from "${BOT}" --chain-id "${CHAIN}" |\
-            ${BIN} tx broadcast - --broadcast-mode sync
+            ${BIN} tx broadcast - --broadcast-mode "${BROADCAST_MODE:-block}"
     done
 }
 
