@@ -183,11 +183,11 @@ generate_transactions_batch() {
 }
 
 generate_transactions() {
-    # find generated tx jsons in batch of 50s and merge into 1 large tx
+    # find generated tx jsons in batches and merge into 1 large tx
 
     find "${TMP}" -type f -name "*.exec" |\
         parallel \
-            -N "${PARALLEL:-50}" \
+            -N "${BATCH:-50}" \
             generate_transactions_batch
 }
 
@@ -201,7 +201,7 @@ sign_and_send() {
 
         # sign and submit transaction
         ${BIN} tx sign "${tx}" --from "${BOT}" --chain-id "${CHAIN}" |\
-            ${BIN} tx broadcast - --broadcast-mode sync
+            ${BIN} tx broadcast - --broadcast-mode "${BROADCAST_MODE:-block}"
     done
 }
 
