@@ -23,6 +23,12 @@ sanity_checks() {
     elif [ -z ${VALIDATOR+x} ] || [ -z ${BOT+x} ]; then
         echo "Environment variables are not configured yet?"
         exit 1
+    elif ! ${BIN} keys show -a "${KEY}" > "${TMP}/address"; then
+        echo "Keyring is not correctly configured?"
+        exit 1
+    elif [ "$(cat "${TMP}"/address)" != "${BOT}" ]; then
+        echo "Keyring address does not match bot wallet (${BOT})?"
+        exit 1
     fi
 }
 
