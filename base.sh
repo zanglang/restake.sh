@@ -14,6 +14,14 @@ if [ -z ${TMP+x} ]; then
 fi
 
 sanity_checks() {
+    if [ ! -d "${TMP}" ]; then
+        mkdir "${TMP}"
+    else
+        2>/dev/null rm -f "${TMP}"/*
+    fi
+
+    echo "{}" > "${TMP}/test"
+
     if ! command -v jq >/dev/null; then
         echo "jq is not found in PATH!"
         exit 1
@@ -28,6 +36,10 @@ sanity_checks() {
         exit 1
     elif [ "$(cat "${TMP}"/address)" != "${BOT}" ]; then
         echo "Keyring address does not match bot wallet (${BOT})?"
+        exit 1
+    elif ! jq . "${TMP}/test"; then
+        # https://stackoverflow.com/questions/58128001/could-not-open-file-lol-json-permission-denied-using-jq
+        echo "jq wasn't able to load a test JSON. Make sure you're not using the Snap version of jq."
         exit 1
     fi
 }
@@ -206,8 +218,11 @@ sign_and_send() {
         echo "Batch $(( ++batch )) = $count txs"
 
         # sign and submit transaction
-        ${BIN} tx sign "${tx}" --from "${BOT}" --chain-id "${CHAIN}" |\
+        2>&1 ${BIN} tx sign "${tx}" --from "${BOT}" --chain-id "${CHAIN}" |\
             ${BIN} tx broadcast - --broadcast-mode "${BROADCAST_MODE:-block}"
+
+        #echo "Sleeping 5 seconds ..."
+        #sleep 5
     done
 }
 
