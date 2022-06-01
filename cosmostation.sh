@@ -53,10 +53,9 @@ check() {
         return
     fi
 
-    withdraw=$(jq -r "select(.authorization.msg==\"/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward\" and .expiration > now)" "${tmp}")
     delegate=$(jq -r "select(((.authorization.\"@type\"==\"/cosmos.staking.v1beta1.StakeAuthorization\" and (.authorization.allow_list.address[] | contains(\"$VALIDATOR\"))) or (.authorization.\"@type\"==\"/cosmos.authz.v1beta1.GenericAuthorization\" and .authorization.msg==\"/cosmos.staking.v1beta1.MsgDelegate\")) and .expiration > now)" "${tmp}")
 
-    if [ -n "${withdraw}" ] && [ -n "${delegate}" ]; then
+    if [ -n "${delegate}" ]; then
         touch "${TMP}/$1.granted"
     fi
 }

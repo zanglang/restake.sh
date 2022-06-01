@@ -124,9 +124,8 @@ load_granters() {
         return
     fi
 
-    withdraw=$(jq -r "select(.authorization.msg==\"/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward\" and .expiration > now)" "${tmp}")
     delegate=$(jq -r "select(((.authorization.\"@type\"==\"/cosmos.staking.v1beta1.StakeAuthorization\" and (.authorization.allow_list.address[] | contains(\"$VALIDATOR\"))) or (.authorization.\"@type\"==\"/cosmos.authz.v1beta1.GenericAuthorization\" and .authorization.msg==\"/cosmos.staking.v1beta1.MsgDelegate\")) and .expiration > now)" "${tmp}")
-    if [ -z "${withdraw}" ] || [ -z "${delegate}" ]; then
+    if [ -z "${delegate}" ]; then
         return
     fi
 
@@ -153,27 +152,26 @@ load_delegations() {
         echo "Failed to fetch delegation for $1"
         return
     fi
-    stake=$(jq -r ".delegation.shares | tonumber" "$tmp")
-    if [ "$stake" -le "0" ] || [ "$stake" == "" ]; then
+    stake=$(jq -r '.delegation.shares as $s | ($s != null and $s != "" and ($s | tonumber > 0))' "$tmp")
+    if [ "$stake" != "true" ]; then
         return
     fi
 
-    if ! ${BIN} q distribution rewards "$1" "${VALIDATOR}" -o json > "$tmp"; then
+    if ! ${BIN} q distribution rewards "$1" "${VALIDATOR}" -o json > "${tmp}.rewards"; then
         echo "Failed to fetch rewards for $1"
         return
     fi
-    rewards=$(jq -r ".rewards[0].amount | tonumber | floor" "$tmp")
-    if [ "$rewards" -le "${THRESHOLD}" ]; then
+    rewards=$(jq -r ".rewards[0].amount | tonumber | floor" "${tmp}.rewards")
+    if [ "$(jq -n "${rewards} >= ${THRESHOLD}")" = "false" ]; then
         echo "$1 rewards ${rewards} too low, skipping."
         return
     fi
 
     # generate claim-and-restake tx
 
-    ${BIN} tx distribution withdraw-rewards "${VALIDATOR}" --from "$1" --gas "${GAS:-200000}" --generate-only > "${TMP}/$1.withdraw"
-    ${BIN} tx staking delegate "${VALIDATOR}" "${rewards}${DENOM}" --from "$1" --gas "${GAS:-200000}" --generate-only > "${TMP}/$1.delegate"
+    ${BIN} tx staking delegate "${VALIDATOR}" "${rewards}${DENOM}" --from "$1" --gas "${GAS_LIMIT:-200000}" --generate-only > "${TMP}/$1.delegate"
 
-    if ! jq -s '(map(.body.messages) | flatten) as $msgs | .[0].body.messages |= $msgs | .[0]' "${TMP}/$1.withdraw" "${TMP}/$1.delegate" |\
+    if ! jq -s '(map(.body.messages) | flatten) as $msgs | .[0].body.messages |= $msgs | .[0]' "${TMP}/$1.delegate" |\
         ${BIN} tx authz exec - --from "$BOT" --generate-only > "${TMP}/$1.exec"; then
         echo "Failed to generate exec transaction!"
         return
