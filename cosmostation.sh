@@ -43,25 +43,6 @@ fetch() {
     fi
 }
 
-check() {
-    # called by parallel
-
-    load_grants "$1"
-
-    tmp="${TMP}/$1"
-    if ! jq -r ".grants[]" "${TMP}/$1."* > "${tmp}" 2>/dev/null; then
-        return
-    fi
-
-    delegate=$(jq -r "select(((.authorization.\"@type\"==\"/cosmos.staking.v1beta1.StakeAuthorization\" and (.authorization.allow_list.address[] | contains(\"$VALIDATOR\"))) or (.authorization.\"@type\"==\"/cosmos.authz.v1beta1.GenericAuthorization\" and .authorization.msg==\"/cosmos.staking.v1beta1.MsgDelegate\")) and .expiration > now)" "${tmp}")
-
-    if [ -n "${delegate}" ]; then
-        touch "${TMP}/$1.granted"
-    fi
-}
-
-export -f check
-
 get_granters() {
     fetch
 
@@ -73,9 +54,9 @@ get_granters() {
             --joblog joblog \
             --retries 1 \
             --progress --bar --eta \
-            check
+            load_granters
 
-    find "${TMP}" -type f -name "*.granted" -exec basename {} \; | cut -d. -f1 > "${GRANTERS}"
+    find "${TMP}" -type f -name "*.granted" ! -empty -exec basename {} \; | cut -d. -f1 > "${GRANTERS}"
 }
 
 main

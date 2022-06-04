@@ -117,19 +117,34 @@ load_grants() {
 load_granters() {
     # called by parallel
 
-    load_grants $1
+    load_grants "$1"
 
-    tmp="$TMP/$1"
-    if ! jq -r ".grants[]" "${TMP}"/$1.* > "${tmp}" 2>/dev/null; then
+    # clear previously cached data, if any
+    tmp="${TMP}/$1"
+    rm -f "${tmp}.granted" 2>/dev/null
+
+    if ! jq -r ".grants[]" "${TMP}"/$1.* > "${tmp}" ; then
+        echo "Error parsing grants for $1!"
         return
     fi
 
-    delegate=$(jq -r "select(((.authorization.\"@type\"==\"/cosmos.staking.v1beta1.StakeAuthorization\" and (.authorization.allow_list.address[] | contains(\"$VALIDATOR\"))) or (.authorization.\"@type\"==\"/cosmos.authz.v1beta1.GenericAuthorization\" and .authorization.msg==\"/cosmos.staking.v1beta1.MsgDelegate\")) and .expiration > now)" "${tmp}")
-    if [ -z "${delegate}" ]; then
+    # check for valid grants
+    if ! jq -r "select(((.authorization.\"@type\"==\"/cosmos.staking.v1beta1.StakeAuthorization\" and (.authorization.allow_list.address[] | contains(\"$VALIDATOR\"))) or (.authorization.\"@type\"==\"/cosmos.authz.v1beta1.GenericAuthorization\" and .authorization.msg==\"/cosmos.staking.v1beta1.MsgDelegate\")) and .expiration > now)" "${tmp}" > "${tmp}.granted"
+    then
+        echo "No valid grants found for $1."
         return
     fi
 
-    touch "${TMP}/$1.granted"
+    # check for remaining allowances, if any
+    allowance=$(jq -s -r "map(.authorization.max_tokens | select(. != null).amount | tonumber) | add" "${tmp}.granted" 2>/dev/null)
+    if [ "$allowance" = "null" ]; then
+        # no max_tokens set
+        return
+    elif [ "$allowance" = "0" ]; then
+        echo "No authorizations with allowances remaining for $1."
+    fi
+
+    echo "$allowance" > "${tmp}.allowance"
 }
 
 get_granters() {
@@ -140,7 +155,7 @@ get_granters() {
         --progress --bar --eta \
         load_granters
 
-    find "${TMP}" -type f -name "*.granted" -exec basename {} \; | cut -d. -f1 >> "${TMP}/granters.txt"
+    find "${TMP}" -type f -name "*.granted" ! -empty -exec basename {} \; | cut -d. -f1 >> "${TMP}/granters.txt"
     mv "${TMP}/granters.txt" "${GRANTERS}"
 }
 
@@ -148,11 +163,11 @@ load_delegations() {
     # calculate delegatable pending rewards. Called by parallel
 
     tmp="$TMP/$1"
-    if ! ${BIN} q staking delegation "$1" "${VALIDATOR}" -o json > "$tmp"; then
+    if ! ${BIN} q staking delegation "$1" "${VALIDATOR}" -o json > "${tmp}.stake"; then
         echo "Failed to fetch delegation for $1"
         return
     fi
-    stake=$(jq -r '.delegation.shares as $s | ($s != null and $s != "" and ($s | tonumber > 0))' "$tmp")
+    stake=$(jq -r '.delegation.shares as $s | ($s != null and $s != "" and ($s | tonumber > 0))' "${tmp}.stake")
     if [ "$stake" != "true" ]; then
         return
     fi
@@ -162,6 +177,15 @@ load_delegations() {
         return
     fi
     rewards=$(jq -r ".rewards[0].amount | tonumber | floor" "${tmp}.rewards")
+
+    # check authz allowances remaining
+    if [ -f "${tmp}.allowance" ]; then
+        allowance=$(cat "${tmp}.allowance")
+        if [ "$allowance" -ge 0 ]; then
+            rewards=$(jq -r -n "[$allowance, $rewards] | min")
+        fi
+    fi
+
     if [ "$(jq -n "${rewards} >= ${THRESHOLD}")" = "false" ]; then
         echo "$1 rewards ${rewards} too low, skipping."
         return
@@ -169,10 +193,10 @@ load_delegations() {
 
     # generate claim-and-restake tx
 
-    ${BIN} tx staking delegate "${VALIDATOR}" "${rewards}${DENOM}" --from "$1" --gas "${GAS_LIMIT:-200000}" --generate-only > "${TMP}/$1.delegate"
+    ${BIN} tx staking delegate "${VALIDATOR}" "${rewards}${DENOM}" --from "$1" --gas "${GAS_LIMIT:-200000}" --generate-only > "${tmp}.delegate"
 
-    if ! jq -s '(map(.body.messages) | flatten) as $msgs | .[0].body.messages |= $msgs | .[0]' "${TMP}/$1.delegate" |\
-        ${BIN} tx authz exec - --from "$BOT" --generate-only > "${TMP}/$1.exec"; then
+    if ! jq -s '(map(.body.messages) | flatten) as $msgs | .[0].body.messages |= $msgs | .[0]' "${tmp}.delegate" |\
+        ${BIN} tx authz exec - --from "$BOT" --generate-only > "${tmp}.exec"; then
         echo "Failed to generate exec transaction!"
         return
     fi
@@ -205,6 +229,14 @@ generate_transactions() {
         parallel \
             -N "${BATCH:-50}" \
             generate_transactions_batch
+
+    count=$(find "${TMP}" -type f -name "batch.*.json" | wc -l)
+    echo "${count} batches generated."
+
+    if [ "$count" -eq 0 ]; then
+        echo "Nothing to do, exiting now."
+        exit 0
+    fi
 }
 
 sign_and_send() {
@@ -219,8 +251,8 @@ sign_and_send() {
         2>&1 ${BIN} tx sign "${tx}" --from "${BOT}" --chain-id "${CHAIN}" |\
             ${BIN} tx broadcast - --broadcast-mode "${BROADCAST_MODE:-block}"
 
-        #echo "Sleeping 5 seconds ..."
-        #sleep 5
+        echo "Sleeping 5 seconds ..."
+        sleep 5
     done
 }
 
