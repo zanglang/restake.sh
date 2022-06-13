@@ -13,7 +13,7 @@ GNU Parallel allows certain tasks, e.g. querying individual delegators' authoriz
 You will need:
 
    - Properly configured wallet CLI for your chain installed in PATH, e.g. `gaiad`
-   - `jq` (https://stedolan.github.io/jq/download/)
+   - `jq` (https://stedolan.github.io/jq/download/) or `gojq` (https://github.com/itchyny/gojq)
    - `parallel` (https://www.gnu.org/software/parallel/)
 
 The wallet CLI should be configured with `<CLI> config` with the following configuration:
@@ -47,6 +47,12 @@ To support running multiple chains within the same folder, simply copy `main.sh`
 `cosmostation.sh` implements an alternative strategy that foregoes querying for delegators and grants, but instead relies on the fact that block explorers like Mintscan indexes authorisation grant transactions on the grantee's page instead of the granter's.
 
 Using an undocumented Cosmostation API, we may retrieve all seen grant transactions on the bot's account page, and _then_ check if the grants are still valid. This reduced my script runtime **down to 20 seconds**!
+
+Additionally, the `fetch` function can be easily re-implemented to download and filter all transactions from any wallet address indexed on Mintscan, e.g. to filter IBC transactions:
+
+    jq -r ".[].data.tx.body.messages[] | select(.\"@type\"==\"/ibc.applications.transfer.v1.MsgTransfer\" or .\"@type\"==\"/ibc.core.channel.v1.MsgRecvPacket\")"
+
+And merged with `jq` for further data-mining.
 
 ## Cronjob
 
