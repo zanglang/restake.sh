@@ -129,7 +129,7 @@ load_granters() {
     fi
 
     # check for valid grants
-    if ! jq -r "select(((.authorization.\"@type\"==\"/cosmos.staking.v1beta1.StakeAuthorization\" and (.authorization.allow_list.address[] | contains(\"$VALIDATOR\"))) or (.authorization.\"@type\"==\"/cosmos.authz.v1beta1.GenericAuthorization\" and .authorization.msg==\"/cosmos.staking.v1beta1.MsgDelegate\")) and .expiration > now)" "${tmp}" > "${tmp}.granted"
+    if ! jq -r "select(((.authorization.\"@type\"==\"/cosmos.staking.v1beta1.StakeAuthorization\" and (.authorization.allow_list.address[] | contains(\"$VALIDATOR\"))) or (.authorization.\"@type\"==\"/cosmos.authz.v1beta1.GenericAuthorization\" and .authorization.msg==\"/cosmos.staking.v1beta1.MsgDelegate\")) and (.expiration | fromdateiso8601) > now)" "${tmp}" > "${tmp}.granted"
     then
         echo "No valid grants found for $1."
         return
@@ -241,6 +241,11 @@ generate_transactions() {
 
 sign_and_send() {
     # send all batched transactions
+
+    if [ "${DRY_RUN:-0}" = "1" ]; then
+        echo "Dry-run enabled, not broadcasting transactions."
+        return
+    fi
 
     batch=0
     for tx in "${TMP}"/batch.*.json; do
