@@ -20,6 +20,7 @@ FROM alpine:edge
 ARG NETWORK=mainnet
 ARG UUID=1000
 ARG GUID=1000
+ARG NODE=http://localhost:26657
 
 # Install ca-certificates
 RUN apk add --no-cache jq curl parallel bash --update ca-certificates
@@ -35,7 +36,8 @@ COPY --chown=chain-main ./*.sh /restake/
 RUN mkdir /restake/data
 
 RUN chain-maind config keyring-backend test && \
-    chain-maind config chain-id crypto-org-chain-mainnet-1
+    chain-maind config chain-id crypto-org-chain-mainnet-1 && \
+    chain-maind config node ${NODE}
 
 # Run restake by default
 CMD ["/restake/cryptoorgchain.sh"]
