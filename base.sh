@@ -176,7 +176,7 @@ load_delegations() {
         echo "Failed to fetch rewards for $1"
         return
     fi
-    rewards=$(jq -r ".rewards[0].amount | tonumber | floor" "${tmp}.rewards")
+    rewards=$(jq -r ".rewards[] | select(.denom==\"${DENOM}\") | .amount | tonumber | floor" "${tmp}.rewards")
 
     # check authz allowances remaining
     if [ -f "${tmp}.allowance" ]; then
