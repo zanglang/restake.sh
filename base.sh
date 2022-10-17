@@ -181,7 +181,7 @@ load_delegations() {
     # check authz allowances remaining
     if [ -f "${tmp}.allowance" ]; then
         allowance=$(cat "${tmp}.allowance")
-        if [ "$allowance" -ge 0 ]; then
+        if [ "$(jq -n "${allowance} > 0")" = "true" ]; then
             rewards=$(jq -r -n "[$allowance, $rewards] | min")
         fi
     fi
