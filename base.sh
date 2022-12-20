@@ -41,6 +41,9 @@ sanity_checks() {
         # https://stackoverflow.com/questions/58128001/could-not-open-file-lol-json-permission-denied-using-jq
         echo "jq wasn't able to load a test JSON. Make sure you're not using the Snap version of jq."
         exit 1
+    elif [ $(jq -rn '1000000000000000000 | floor | tostring') != "1000000000000000000" ]; then
+        echo "Current version of jq does not support big integers! Upgrade or switch to gojq."
+        exit 1
     fi
 }
 
@@ -246,6 +249,9 @@ sign_and_send() {
         echo "Dry-run enabled, not broadcasting transactions."
         return
     fi
+    if [ -n "$RPC" ]; then
+        param="${param} --node ${RPC}"
+    fi
 
     batch=0
     for tx in "${TMP}"/batch.*.json; do
@@ -253,8 +259,8 @@ sign_and_send() {
         echo "Batch $(( ++batch )) = $count txs"
 
         # sign and submit transaction
-        2>&1 ${BIN} tx sign "${tx}" --from "${BOT}" --chain-id "${CHAIN}" |\
-            ${BIN} tx broadcast - --broadcast-mode "${BROADCAST_MODE:-block}"
+        2>&1 ${BIN} tx sign "${tx}" --from "${BOT}" --chain-id "${CHAIN}" --output-document "${tx}.signed" ${param}
+        2>&1 ${BIN} tx broadcast "${tx}.signed" --broadcast-mode "${BROADCAST_MODE:-block}" ${param}
 
         echo "Sleeping 5 seconds ..."
         sleep 5
