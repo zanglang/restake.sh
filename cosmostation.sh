@@ -22,8 +22,13 @@ fetch() {
     from=${1:-0}
     echo "Fetching transactions from Cosmostation with from=${from} ..."
 
-    if ! curl -s "https://api-cryptocom.cosmostation.io/v1/account/new_txs/${BOT}?limit=50&from=${from}" \
-            -H 'Referer: https://www.mintscan.io/' > "${TMP}/txs"; then
+    if ! curl -s "https://api.mintscan.io/v1/crypto-org/account/${BOT}/txs?limit=50&from=${from}" \
+            -H 'authority: api.mintscan.io' \
+            -H 'accept: application/json, text/plain, */*' \
+            -H 'origin: https://www.mintscan.io' \
+            -H 'referer: https://www.mintscan.io/' \
+            -H 'user-agent: Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1)' \
+            > "${TMP}/txs"; then
         echo "Error fetching data from Cosmostation!"
         exit 1
     fi
