@@ -13,10 +13,15 @@ if [ -z ${TMP+x} ]; then
     trap "{ rm -rf $TMP; }" EXIT
 fi
 
+# check debug mode
+if [[ "$-" == *x* ]]; then
+    export DEBUG=1
+fi
+
 sanity_checks() {
     if [ ! -d "${TMP}" ]; then
         mkdir "${TMP}"
-    else
+    elif [ "${DEBUG:-0}" != "1" ]; then
         2>/dev/null rm -f "${TMP}"/*
     fi
 
@@ -120,6 +125,10 @@ load_grants() {
 load_granters() {
     # called by parallel
 
+    if [ "${DEBUG:-0}" = "1" ]; then
+        set -x
+    fi
+
     load_grants "$1"
 
     # clear previously cached data, if any
@@ -164,6 +173,10 @@ get_granters() {
 
 load_delegations() {
     # calculate delegatable pending rewards. Called by parallel
+
+    if [ "${DEBUG:-0}" = "1" ]; then
+        set -x
+    fi
 
     tmp="$TMP/$1"
     if ! ${BIN} q staking delegation "$1" "${VALIDATOR}" -o json > "${tmp}.stake"; then
@@ -218,6 +231,10 @@ process_delegations() {
 
 generate_transactions_batch() {
     # concatenate transactions in batches and calculate fees. Called by parallel
+
+    if [ "${DEBUG:-0}" = "1" ]; then
+        set -x
+    fi
 
     if ! jq -s "(map(.body.messages) | flatten) as \$msgs | .[0].body.messages |= \$msgs | .[0].body.memo = \"${MEMO}\" | (.[0].body.messages | length) as \$len | .[0].auth_info.fee.gas_limit = (\$len * ${GAS_LIMIT:-200000} | tostring) | .[0].auth_info.fee.amount = [{\"denom\":\"${DENOM}\", \"amount\":(\$len * ${GAS_LIMIT:-200000} * ${GAS_PRICE} | floor | tostring)}] | .[0]" "${@}" > "${TMP}/batch.${PARALLEL_SEQ}.json"; then
         echo "Failed to generate transaction!"
