@@ -1,17 +1,17 @@
 #!/bin/bash
 
-# shellcheck disable=SC2155
-export SCRIPT_PATH=$(dirname "$0")
-export DELEGATORS="${SCRIPT_PATH}/data/delegators.txt"
-export GRANTERS="${SCRIPT_PATH}/data/granters.txt"
-
 ####
 
-# shellcheck disable=SC2064
+# shellcheck disable=SC2064,SC2155
 if [ -z ${TMP+x} ]; then
     export TMP=$(mktemp -d)
     trap "{ rm -rf $TMP; }" EXIT
 fi
+
+# shellcheck disable=SC2155
+export SCRIPT_PATH=$(dirname "$0")
+export GRANTERS="${TMP}/granters.txt"
+export GRANTS="${TMP}/grants.txt"
 
 # check debug mode
 if [[ "$-" == *x* ]]; then
@@ -27,6 +27,7 @@ sanity_checks() {
 
     echo "{}" > "${TMP}/test"
 
+    # shellcheck disable=SC2046
     if ! command -v jq >/dev/null; then
         echo "jq is not found in PATH!"
         exit 1
@@ -42,17 +43,20 @@ sanity_checks() {
     elif [ "$(cat "${TMP}"/address)" != "${BOT}" ]; then
         echo "Keyring address does not match bot wallet (${BOT})?"
         exit 1
-    elif ! jq . "${TMP}/test"; then
+    elif ! jq . "${TMP}/test" >/dev/null; then
         # https://stackoverflow.com/questions/58128001/could-not-open-file-lol-json-permission-denied-using-jq
         echo "jq wasn't able to load a test JSON. Make sure you're not using the Snap version of jq."
         exit 1
     elif [ $(jq -rn '1000000000000000000 | floor | tostring') != "1000000000000000000" ]; then
         echo "Current version of jq does not support big integers! Upgrade or switch to gojq."
         exit 1
+    elif ! ${BIN} q authz --help | grep -q "grants-by-grantee"; then
+        echo "This script now requires grants-by-grantee support!"
+        exit 1
     fi
 }
 
-get_delegators() {
+get_grants() {
     limit=100
 
     param=
@@ -64,17 +68,18 @@ get_delegators() {
         param="${param} --node ${RPC}"
     fi
 
-    tmp="$TMP/${VALIDATOR}.${offset}"
-    F="${TMP}/delegators.txt"
-    echo "Fetching with offset ${offset} ..."
+    tmp="$TMP/${BOT}.${offset}"
+    F="${TMP}/grants.txt"
+    echo "Fetching granters with offset ${offset} ..."
 
     # shellcheck disable=SC2086
-    if ! ${BIN} q staking delegations-to "$VALIDATOR" --limit "${limit}" --output json ${param} > "${tmp}"; then
-        echo "Error querying delegators!"
+    if ! ${BIN} q authz grants-by-grantee "$BOT" --limit "${limit}" --output json ${param} > "${tmp}"; then
+        echo "Error querying granters!"
         exit 1
     fi
 
-    if ! jq -r ".delegation_responses[].delegation.delegator_address" "${tmp}" >> "${F}"; then
+    if ! jq -r ".grants[] | select(((.authorization.\"@type\"==\"/cosmos.staking.v1beta1.StakeAuthorization\" and (.authorization.allow_list.address[] | contains(\"$VALIDATOR\"))) or (.authorization.\"@type\"==\"/cosmos.authz.v1beta1.GenericAuthorization\" and .authorization.msg==\"/cosmos.staking.v1beta1.MsgDelegate\")) and (.expiration | fromdateiso8601) > now)" "${tmp}" >> "${F}"
+    then
         echo "Error parsing ${tmp}! Dumping:"
         cat "${tmp}"
         exit 1
@@ -84,91 +89,11 @@ get_delegators() {
     if [ -n "$next" ] ; then
         # recurse
         offset=$((offset+limit))
-        get_delegators "${offset}"
+        get_grants "${offset}"
     else
-        echo "Load complete. Moving ${F} ..."
-        mv -f "${F}" "${DELEGATORS}"
+        # done fetching all grants, 
+        jq -r ".granter" "$F" | sort > "$GRANTERS"
     fi
-}
-
-load_grants() {
-    # called by load_granters
-
-    limit=1000
-
-    param=
-    offset=${2:-0}
-    if [ "${offset}" != "0" ]; then
-        param="--offset ${offset}"
-    fi
-    if [ -n "$RPC" ]; then
-        param="${param} --node ${RPC}"
-    fi
-
-    tmp="$TMP/$1.${offset}"
-
-    # shellcheck disable=SC2086
-    if ! ${BIN} q authz grants "$1" "$BOT" --limit "${limit}" --output json ${param} > "${tmp}"; then
-        echo "Error querying authz!"
-        exit 1
-    fi
-
-    next=$(jq -r ".pagination.next_key // empty" "${tmp}")
-    if [ -n "$next" ]; then
-        # recurse
-        offset=$((offset+limit))
-        load_grants "$1" "${offset}"
-    fi
-}
-
-# shellcheck disable=SC2086
-load_granters() {
-    # called by parallel
-
-    if [ "${DEBUG:-0}" = "1" ]; then
-        set -x
-    fi
-
-    load_grants "$1"
-
-    # clear previously cached data, if any
-    tmp="${TMP}/$1"
-    rm -f "${tmp}.granted" 2>/dev/null
-
-    if ! jq -r ".grants[]" "${TMP}"/$1.* > "${tmp}" ; then
-        echo "Error parsing grants for $1!"
-        return
-    fi
-
-    # check for valid grants
-    if ! jq -r "select(((.authorization.\"@type\"==\"/cosmos.staking.v1beta1.StakeAuthorization\" and (.authorization.allow_list.address[] | contains(\"$VALIDATOR\"))) or (.authorization.\"@type\"==\"/cosmos.authz.v1beta1.GenericAuthorization\" and .authorization.msg==\"/cosmos.staking.v1beta1.MsgDelegate\")) and (.expiration | fromdateiso8601) > now)" "${tmp}" > "${tmp}.granted"
-    then
-        echo "No valid grants found for $1."
-        return
-    fi
-
-    # check for remaining allowances, if any
-    allowance=$(jq -s -r "map(.authorization.max_tokens | select(. != null).amount | tonumber) | add" "${tmp}.granted" 2>/dev/null)
-    if [ "$allowance" = "null" ]; then
-        # no max_tokens set
-        return
-    elif [ "$allowance" = "0" ]; then
-        echo "No authorizations with allowances remaining for $1."
-    fi
-
-    echo "$allowance" > "${tmp}.allowance"
-}
-
-get_granters() {
-    parallel -a "${DELEGATORS}" \
-        --jobs "${PARALLEL:-50}" \
-        --joblog joblog \
-        --retries 1 \
-        --progress --bar --eta \
-        load_granters
-
-    find "${TMP}" -type f -name "*.granted" ! -empty -exec basename {} \; | cut -d. -f1 >> "${TMP}/granters.txt"
-    mv "${TMP}/granters.txt" "${GRANTERS}"
 }
 
 load_delegations() {
@@ -195,8 +120,11 @@ load_delegations() {
     rewards=$(jq -r ".rewards[] | select(.denom==\"${DENOM}\") | .amount | tonumber | floor" "${tmp}.rewards")
 
     # check authz allowances remaining
-    if [ -f "${tmp}.allowance" ]; then
-        allowance=$(cat "${tmp}.allowance")
+    allowance=$(jq -r -s "map(select(.granter == \"$1\") | .authorization.max_tokens | select(. != null).amount | tonumber) | add" "${GRANTS}" 2>/dev/null)
+    if [ "$allowance" = "0" ]; then
+        echo "No authorizations with allowances remaining for $1."
+        return
+    elif [ "$allowance" != "null" ]; then
         if [ "$(jq -n "${allowance} > 0")" = "true" ]; then
             rewards=$(jq -r -n "[$allowance, $rewards] | min")
         fi
@@ -266,17 +194,20 @@ sign_and_send() {
         echo "Dry-run enabled, not broadcasting transactions."
         return
     fi
+    param=
     if [ -n "$RPC" ]; then
         param="${param} --node ${RPC}"
     fi
 
     batch=0
     for tx in "${TMP}"/batch.*.json; do
-        count=$(grep -c MsgExec "${tx}")
+        count=$(grep -c MsgDelegate "${tx}")
         echo "Batch $(( ++batch )) = $count txs"
 
         # sign and submit transaction
+        # shellcheck disable=SC2086
         2>&1 ${BIN} tx sign "${tx}" --from "${BOT}" --chain-id "${CHAIN}" --output-document "${tx}.signed" ${param}
+        # shellcheck disable=SC2086
         2>&1 ${BIN} tx broadcast "${tx}.signed" --broadcast-mode "${BROADCAST_MODE:-block}" ${param}
 
         echo "Sleeping 5 seconds ..."
@@ -284,8 +215,6 @@ sign_and_send() {
     done
 }
 
-export -f load_grants
-export -f load_granters
 export -f load_delegations
 export -f generate_transactions_batch
 
@@ -294,28 +223,20 @@ main() {
 
     sanity_checks
 
-    get_delegators
-
-    num_delegators=$(wc -l < "${DELEGATORS}")
-    if [ "$num_delegators" -le 0 ]; then
-        echo "No delegators found. Exiting."
-        exit 0
-    fi
-    echo "Done. ${num_delegators} delegators found. Fetching grants ..."
-
-    get_granters
+    echo "Fetching grants ..."
+    get_grants
 
     num_granters=$(wc -l < "${GRANTERS}")
     if [ "$num_granters" -le 0 ]; then
         echo "No granters found. Exiting."
         exit 0
     fi
-    echo "Done. ${num_delegators} delegators processed, found ${num_granters} granters."
+    echo "Done, found ${num_granters} granters."
 
-    echo "Processing delegations ..."
+    echo "Processing delegations for restaking transactions ..."
     process_delegations
 
-    echo "Generating authz transactions ..."
+    echo "Generating batched transactions ..."
     generate_transactions
 
     echo "Submitting final transactions ..."
