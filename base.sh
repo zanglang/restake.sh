@@ -78,7 +78,7 @@ get_grants() {
         exit 1
     fi
 
-    if ! jq -r ".grants[] | select(((.authorization.\"@type\"==\"/cosmos.staking.v1beta1.StakeAuthorization\" and (.authorization.allow_list.address[] | contains(\"$VALIDATOR\"))) or (.authorization.\"@type\"==\"/cosmos.authz.v1beta1.GenericAuthorization\" and .authorization.msg==\"/cosmos.staking.v1beta1.MsgDelegate\")) and (.expiration | fromdateiso8601) > now)" "${tmp}" >> "${F}"
+    if ! jq -r "def not_expired(k): if k == null then true else (k | fromdateiso8601) > now end; .grants[] | select(((.authorization.\"@type\"==\"/cosmos.staking.v1beta1.StakeAuthorization\" and (.authorization.allow_list.address[] | contains(\"$VALIDATOR\"))) or (.authorization.\"@type\"==\"/cosmos.authz.v1beta1.GenericAuthorization\" and .authorization.msg==\"/cosmos.staking.v1beta1.MsgDelegate\")) and not_expired(.expiration))" "${tmp}" >> "${F}"
     then
         echo "Error parsing ${tmp}! Dumping:"
         cat "${tmp}"
