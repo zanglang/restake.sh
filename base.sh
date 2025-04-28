@@ -62,7 +62,12 @@ get_grants() {
     param=
     offset=${1:-0}
     if [ "${offset}" != "0" ]; then
-        param="--offset ${offset}"
+        # if BIN is gaiad or osmosisd, then use --page-offset instead
+        if [[ "${BIN}" =~ (gaiad|osmosisd) ]]; then
+            param="--page-offset ${offset}"
+        else
+            param="--offset ${offset}"
+        fi
     fi
     if [ -n "$RPC" ]; then
         param="${param} --node ${RPC}"
@@ -73,12 +78,45 @@ get_grants() {
     echo "Fetching granters with offset ${offset} ..."
 
     # shellcheck disable=SC2086
-    if ! ${BIN} q authz grants-by-grantee "$BOT" --limit "${limit}" --output json ${param} > "${tmp}"; then
-        echo "Error querying granters!"
-        exit 1
+    # if BIN is gaiad or osmosisd, then use --page-limit instead
+    if [[ "${BIN}" =~ (gaiad|osmosisd) ]]; then
+        if ! ${BIN} q authz grants-by-grantee "$BOT" --page-limit "${limit}" --output json ${param} &> "${tmp}"; then
+            echo "Error querying granters!"
+            exit 1
+        fi
+    else
+        if ! ${BIN} q authz grants-by-grantee "$BOT" --limit "${limit}" --output json ${param} > "${tmp}"; then
+            echo "Error querying granters!"
+            exit 1
+        fi
     fi
 
-    if ! jq -r "def not_expired(k): if k == null then true else (k | fromdateiso8601) > now end; .grants[] | select(((.authorization.\"@type\"==\"/cosmos.staking.v1beta1.StakeAuthorization\" and (.authorization.allow_list.address[] | contains(\"$VALIDATOR\"))) or (.authorization.\"@type\"==\"/cosmos.authz.v1beta1.GenericAuthorization\" and .authorization.msg==\"/cosmos.staking.v1beta1.MsgDelegate\")) and not_expired(.expiration))" "${tmp}" >> "${F}"
+    if ! jq -r "
+        def not_expired(k): if k == null then true else (k | fromdateiso8601) > now end;
+        def has_validator(auth):
+        auth
+        | .. 
+        | objects 
+        | select(has(\"address\")) 
+        | .address[]? 
+        | select(contains(\"${VALIDATOR}\")) 
+        | length > 0;
+
+        .grants[] |
+        select(
+            (
+            (
+                (.authorization.\"@type\" == \"/cosmos.staking.v1beta1.StakeAuthorization\" or .authorization.type == \"/cosmos.staking.v1beta1.StakeAuthorization\") and
+                has_validator(.authorization)
+            ) or
+            (
+                .authorization.\"@type\" == \"/cosmos.authz.v1beta1.GenericAuthorization\" and
+                .authorization.msg == \"/cosmos.staking.v1beta1.MsgDelegate\"
+            )
+            )
+            and not_expired(.expiration)
+        )
+        " "${tmp}" >> "${F}"
     then
         echo "Error parsing ${tmp}! Dumping:"
         cat "${tmp}"
@@ -104,20 +142,45 @@ load_delegations() {
     fi
 
     tmp="$TMP/$1"
-    if ! ${BIN} q staking delegation "$1" "${VALIDATOR}" -o json > "${tmp}.stake"; then
+    if ! ${BIN} q staking delegation "$1" "${VALIDATOR}" -o json &> "${tmp}.stake"; then
         echo "Failed to fetch delegation for $1"
         return
     fi
-    stake=$(jq -r '.delegation.shares as $s | ($s != null and $s != "" and ($s | tonumber > 0))' "${tmp}.stake")
+    stake=$(jq -r '
+        (
+            .delegation.shares // 
+            .delegation_response.delegation.shares
+        ) as $s | ($s != null and $s != "" and ($s | tonumber > 0))
+        ' "${tmp}.stake")
     if [ "$stake" != "true" ]; then
         return
     fi
 
-    if ! ${BIN} q distribution rewards "$1" "${VALIDATOR}" -o json > "${tmp}.rewards"; then
-        echo "Failed to fetch rewards for $1"
-        return
+    # for gaiad/osmosisd, use `q distribution rewards-by-validator`
+    if [[ "${BIN}" =~ (gaiad|osmosisd) ]]; then
+        if ! ${BIN} q distribution rewards-by-validator "$1" "${VALIDATOR}" -o json &> "${tmp}.rewards"; then
+            echo "Failed to fetch rewards for $1"
+            return
+        fi
+    else
+        if ! ${BIN} q distribution rewards "$1" "${VALIDATOR}" -o json > "${tmp}.rewards"; then
+            echo "Failed to fetch rewards for $1"
+            return
+        fi
     fi
-    rewards=$(jq -r ".rewards[] | select(.denom==\"${DENOM}\") | .amount | tonumber | floor" "${tmp}.rewards")
+
+    rewards=$(jq -r "
+        .rewards[]? |
+        if type == \"object\" and (.denom? == \"${DENOM}\") then
+            .amount
+        elif type == \"string\" and endswith(\"${DENOM}\") then
+            sub(\"${DENOM}\$\"; \"\")
+        else
+            empty
+        end
+        | tonumber
+        | floor
+        " "${tmp}.rewards")
 
     # check authz allowances remaining
     allowance=$(jq -r -s "map(select(.granter == \"$1\") | .authorization.max_tokens | select(. != null).amount | tonumber) | add" "${GRANTS}" 2>/dev/null)
@@ -164,7 +227,7 @@ generate_transactions_batch() {
         set -x
     fi
 
-    if ! jq -s "(map(.body.messages) | flatten) as \$msgs | .[0].body.messages |= \$msgs | .[0].body.memo = \"${MEMO}\" | (.[0].body.messages | length) as \$len | .[0].auth_info.fee.gas_limit = (\$len * ${GAS_LIMIT:-200000} | tostring) | .[0].auth_info.fee.amount = [{\"denom\":\"${DENOM}\", \"amount\":(\$len * ${GAS_LIMIT:-200000} * ${GAS_PRICE} | floor | tostring)}] | .[0]" "${@}" > "${TMP}/batch.${PARALLEL_SEQ}.json"; then
+    if ! jq -s "(map(.body.messages) | flatten) as \$msgs | .[0].body.messages |= \$msgs | .[0].body.memo = \"${MEMO}\" | (.[0].body.messages | length) as \$len | .[0].auth_info.fee.gas_limit = (\$len * ${GAS_LIMIT:-200000} | tostring) | .[0].auth_info.fee.amount = [{\"denom\":\"${DENOM}\", \"amount\":(\$len * ${GAS_LIMIT:-200000} * ${GAS_PRICE} | ceil | tostring)}] | .[0]" "${@}" > "${TMP}/batch.${PARALLEL_SEQ}.json"; then
         echo "Failed to generate transaction!"
         exit 1
     fi
@@ -210,8 +273,8 @@ sign_and_send() {
         # shellcheck disable=SC2086
         2>&1 ${BIN} tx broadcast "${tx}.signed" --broadcast-mode "${BROADCAST_MODE:-block}" ${param}
 
-        echo "Sleeping 5 seconds ..."
-        sleep 5
+        echo "Sleeping 60 seconds ..."
+        sleep 60
     done
 }
 
